@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "RAGFlow 知识库",
+    "description": "选择 ragflow_retrieval 默认检索哪些知识库。"
+  }
+}

@@ -1,0 +1,6 @@
+# Inserted by @local/dsh-ragflow-settings.
+# The Host half serves /ragflow-settings/* (dataset list + saved selection);
+# the browser half registers the "RAGFlow knowledge bases" page on the Plugins page.
+- insert:
+    - id: ragflow-settings
+      name: '@local/dsh-ragflow-settings'
