@@ -99,11 +99,15 @@ window.__ModuleLoader__.load({
       '.dsh-ragflow-status[data-tone="error"]{color:var(--dsw-alias-state-error-primary)}',
       '.dsh-ragflow-status[data-tone="success"]{color:var(--dsw-alias-state-success-primary)}',
       '.dsh-ragflow-path{margin:0;color:var(--dsw-alias-label-tertiary);font-size:11.5px;line-height:16px;overflow-wrap:anywhere}',
-      '.dsh-ragflow-trigger{display:inline-flex;align-items:center;gap:6px;border:.5px solid var(--dsw-alias-border-l4);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-3);color:var(--dsw-alias-label-primary);font:inherit;font-size:12.5px;height:28px;padding:0 10px;cursor:pointer;white-space:nowrap}',
+      '.dsh-ragflow-trigger{display:inline-flex;align-items:center;justify-content:center;gap:5px;border:.5px solid var(--dsw-alias-border-l4);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-3);color:var(--dsw-alias-label-primary);font:inherit;font-size:12.5px;height:28px;min-width:28px;padding:0 7px;cursor:pointer;white-space:nowrap}',
       '.dsh-ragflow-trigger:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}',
       '.dsh-ragflow-trigger:disabled{opacity:.55;cursor:default}',
       '.dsh-ragflow-trigger[data-state="none"]{color:var(--dsw-alias-state-error-primary)}',
       '.dsh-ragflow-trigger-badge{flex:none;min-width:16px;border-radius:999px;background:var(--dsw-alias-bg-layer-1);padding:0 5px;font-size:11px;line-height:16px;text-align:center}',
+      '.dsh-ragflow-trigger-icon{flex:none;width:17px;height:17px;display:block}',
+      '.dsh-ragflow-visually-hidden{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}',
+      '.dsh-ragflow-trigger[data-state="none"] .dsh-ragflow-trigger-icon{opacity:.45}',
+      '.dsh-ragflow-trigger[data-state="none"]{color:var(--dsw-alias-label-tertiary)}',
       '.dsh-ragflow-mask{position:fixed;inset:0;z-index:9999;display:flex;align-items:flex-end;justify-content:center;background:rgba(0,0,0,.28)}',
       '.dsh-ragflow-pop{display:flex;flex-direction:column;gap:10px;width:min(520px,calc(100vw - 32px));max-height:min(70vh,560px);margin-bottom:96px;border:.5px solid var(--dsw-alias-border-l3);border-radius:var(--dsw-radius-lg);background:var(--dsw-alias-bg-layer-1);box-shadow:0 12px 40px rgba(0,0,0,.28);padding:14px;overflow:auto}',
       '.dsh-ragflow-pop-head{display:flex;align-items:center;justify-content:space-between;gap:12px}',
@@ -429,8 +433,9 @@ window.__ModuleLoader__.load({
             if (!open) void load()
           }
         },
-        h('span', null, triggerLabel),
-        state.status === 'ready' ? h('span', { className: 'dsh-ragflow-trigger-badge' }, String(count)) : null
+        h(BookIcon, null),
+        h('span', { className: 'dsh-ragflow-visually-hidden' }, triggerLabel),
+        state.status === 'ready' && count > 0 ? h('span', { className: 'dsh-ragflow-trigger-badge' }, String(count)) : null
       )
 
       if (!open) return trigger
@@ -502,6 +507,29 @@ window.__ModuleLoader__.load({
         mounted = null
       }
       return h(React.Fragment, null, trigger, mounted)
+    }
+
+    /**
+     * The trigger glyph: an open book, drawn with currentColor so it inherits
+     * the button's enabled / disabled colour exactly as the label did.
+     */
+    function BookIcon() {
+      return h(
+        'svg',
+        {
+          className: 'dsh-ragflow-trigger-icon',
+          viewBox: '0 0 24 24',
+          fill: 'none',
+          stroke: 'currentColor',
+          strokeWidth: 1.8,
+          strokeLinecap: 'round',
+          strokeLinejoin: 'round',
+          'aria-hidden': 'true',
+          focusable: 'false'
+        },
+        h('path', { d: 'M12 6.5C10.6 5.2 8.6 4.5 6 4.5H4v13h2c2.6 0 4.6.7 6 2 1.4-1.3 3.4-2 6-2h2v-13h-2c-2.6 0-4.6.7-6 2z' }),
+        h('path', { d: 'M12 6.5v13' })
+      )
     }
 
     const inject = ['slots', 'locale']

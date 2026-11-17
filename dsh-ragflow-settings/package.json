@@ -1,6 +1,6 @@
 {
   "name": "@local/dsh-ragflow-settings",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "Pick the RAGFlow knowledge bases the ragflow_retrieval MCP tool searches by default.",
   "type": "module",
