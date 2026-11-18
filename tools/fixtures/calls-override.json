@@ -1,0 +1,14 @@
+{
+  "calls": [
+    {
+      "name": "ragflow_retrieval",
+      "arguments": {
+        "question": "上下料规则是什么",
+        "page_size": 2,
+        "dataset_ids": [
+          "7a0202c08a6b11f18abb934b203a2e28"
+        ]
+      }
+    }
+  ]
+}

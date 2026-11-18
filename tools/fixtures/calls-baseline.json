@@ -1,0 +1,11 @@
+{
+  "calls": [
+    {
+      "name": "ragflow_retrieval",
+      "arguments": {
+        "question": "上下料规则是什么",
+        "page_size": 3
+      }
+    }
+  ]
+}

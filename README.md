@@ -217,6 +217,7 @@ skipping profile bundle "@local/dsh-ragflow-settings": SyntaxError: Unexpected t
 - [RAGFlow接入-恢复说明.md](./RAGFlow接入-恢复说明.md) —— 完整恢复步骤、自检清单、卸载方法
 - [dsh-ragflow-settings/README.md](./dsh-ragflow-settings/README.md) —— 插件细节、路由、踩坑
 - [dsh-ragflow-settings/交付报告.md](./dsh-ragflow-settings/交付报告.md) —— 会话级检索的验收实证
+- [tools/README.md](./tools/README.md) —— 自检脚本：MCP 探针、路由挂载、渲染验证、清单校验
 
 ---
 
