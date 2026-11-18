@@ -1,8 +1,8 @@
 {
   "name": "@local/dsh-ragflow-settings",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "private": true,
-  "description": "Pick the RAGFlow knowledge bases the ragflow_retrieval MCP tool searches by default.",
+  "description": "Session-scoped RAGFlow knowledge-base selection plus the Host ragflow_retrieval tools it drives.",
   "type": "module",
   "main": "lib/index.js",
   "exports": {

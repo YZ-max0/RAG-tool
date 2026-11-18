@@ -1,13 +1,20 @@
 /**
- * RAGFlow knowledge-base selection, Host half.
+ * RAGFlow knowledge-base selection and retrieval, Host half.
  *
- * Serves two same-origin routes the browser half uses:
+ * Serves same-origin routes the browser half uses:
  *   GET  /ragflow-settings/state      -> accessible datasets + the saved selection
- *   POST /ragflow-settings/selection  -> persist the selected dataset ids
+ *   POST /ragflow-settings/selection  -> persist the global default dataset ids
+ *   GET  /ragflow-settings/session    -> one session's datasets, override, effective ids
+ *   POST /ragflow-settings/session    -> persist one session's override
  *
- * The selection lands in <DSH_HOME>/ragflow-settings.json, the file the
- * ragflow-mcp stdio bridge (../../ragflow-mcp/server.cjs) reads to decide which
- * dataset_ids ragflow_retrieval uses when the caller omits them.
+ * Registers two Host tools that call RAGFlow directly:
+ *   ragflow_list_datasets  -> accessible datasets
+ *   ragflow_retrieval      -> chunks, scoped by the calling Session
+ *
+ * Session scoping is the reason these are Host tools rather than MCP tools: an
+ * MCP stdio server is one shared child process with a scrubbed environment, so
+ * it can never see which Session called it. A Host tool receives that Session
+ * as `exec.agent.id`, which is what makes per-conversation selection real.
  *
  * Node built-ins only: this package must install without a dependency tree.
  */
@@ -23,8 +30,8 @@ const execFileAsync = promisify(execFile)
 
 export const name = 'ragflow-settings'
 
-/** Routes need the web server; without one this Host half stays inactive. */
-export const inject = ['webServer']
+/** Routes need the web server; the retrieval tools need the tool registry. */
+export const inject = ['webServer', 'tools']
 
 const CONFIG_FILE = 'ragflow-settings.json'
 const SESSION_FILE = 'ragflow-session-selection.json'
@@ -294,6 +301,82 @@ async function writeSessionSelection(sessionId, datasetIds) {
   })
 }
 
+/**
+ * One RAGFlow REST call that carries a JSON body.
+ * @param method - HTTP method.
+ * @param path - path with query string.
+ * @param key - bearer credential.
+ * @param body - the JSON request body.
+ * @param signal - cancellation forwarded to the socket.
+ * @returns the parsed JSON response.
+ */
+function apiCallJson(method, path, key, body, signal) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(baseUrl() + path)
+    const payload = JSON.stringify(body)
+    const transport = url.protocol === 'https:' ? https : http
+    const req = transport.request(
+      {
+        hostname: url.hostname,
+        port: url.port || (url.protocol === 'https:' ? 443 : 80),
+        path: url.pathname + url.search,
+        method,
+        headers: {
+          authorization: 'Bearer ' + key,
+          'content-type': 'application/json',
+          'content-length': Buffer.byteLength(payload),
+        },
+        timeout: 30000,
+        signal,
+      },
+      (res) => {
+        let text = ''
+        res.on('data', (chunk) => {
+          text += chunk
+        })
+        res.on('end', () => {
+          try {
+            resolve(JSON.parse(text))
+          } catch {
+            reject(new Error('RAGFlow returned non-JSON (' + String(res.statusCode) + '): ' + text.slice(0, 300)))
+          }
+        })
+      },
+    )
+    req.on('timeout', () => {
+      req.destroy(new Error('RAGFlow request timed out'))
+    })
+    req.on('error', reject)
+    req.end(payload)
+  })
+}
+
+/**
+ * Which datasets one retrieval searches, and why.
+ *
+ * Precedence: an explicit argument, then this Session's own choice, then the
+ * global default, then every accessible dataset. A Session that deliberately
+ * cleared its list searches nothing — that is a choice, not a fallback.
+ * @param explicit - dataset ids the caller passed.
+ * @param sessionId - the calling Session id, when the caller identified one.
+ * @returns the ids to search plus the precedence rule that produced them.
+ */
+async function resolveDatasetIds(explicit, sessionId) {
+  const accessible = (await listDatasets()).map((row) => row.id)
+  if (explicit.length > 0) {
+    return { ids: explicit.filter((id) => accessible.includes(id)), source: 'argument' }
+  }
+  if (typeof sessionId === 'string' && sessionId.length > 0) {
+    const stored = await readSessionSelection(sessionId)
+    if (stored !== undefined) {
+      return { ids: stored.filter((id) => accessible.includes(id)), source: 'session' }
+    }
+  }
+  const saved = (await readSelection()).filter((id) => accessible.includes(id))
+  if (saved.length > 0) return { ids: saved, source: 'global' }
+  return { ids: accessible, source: 'all' }
+}
+
 /** Send a JSON response. */
 function sendJson(res, status, value) {
   res.writeHead(status, {
@@ -447,4 +530,118 @@ export function apply(ctx) {
       }),
     'ragflow-settings: session selection route',
   )
+
+  registerTools(ctx)
+}
+
+/** Session ids DSH mints; the same shape the session selection file keys on. */
+const TOOL_SESSION_PATTERN = SESSION_ID_PATTERN
+
+/**
+ * The Session a call belongs to, read from the execution's owning Agent.
+ * @param exec - the tool execution handed to a definition.
+ * @returns the Session id, or undefined for an execution with no Agent.
+ */
+function sessionOf(exec) {
+  const id = exec && exec.agent ? exec.agent.id : undefined
+  return typeof id === 'string' && TOOL_SESSION_PATTERN.test(id) ? id : undefined
+}
+
+/** Render a canonical JSON value as the model-facing text block. */
+function renderJson(_args, value) {
+  return [{ type: 'text', text: JSON.stringify(value, null, 2) }]
+}
+
+/**
+ * Register the RAGFlow tools on this Host.
+ *
+ * These replace the MCP bridge for retrieval because only a Host tool can see
+ * its calling Session; the bridge stays for non-DSH clients that spawn it
+ * themselves.
+ * @param ctx - the plugin context carrying the tool registry.
+ */
+function registerTools(ctx) {
+  ctx.tools.register({
+    name: 'ragflow_list_datasets',
+    description:
+      'List the RAGFlow knowledge bases the configured API key can read, with document and chunk counts. '
+      + 'Use it to pick dataset ids for ragflow_retrieval.',
+    parameters: {},
+    output: { schema: { type: 'array', items: { type: 'object' } }, render: renderJson },
+    async execute(_args, exec) {
+      return await listDatasets()
+    },
+  })
+
+  ctx.tools.register({
+    name: 'ragflow_retrieval',
+    description:
+      'Search the RAGFlow knowledge bases and return relevant chunks with source files and scores. '
+      + 'The search scope follows the current conversation: pass dataset_ids to override it, '
+      + 'otherwise the knowledge bases selected for this conversation are searched, then the '
+      + 'plugin-page default, then every accessible dataset. The result echoes dataset_ids and '
+      + 'dataset_source so the scope actually used is visible.',
+    parameters: {
+      question: { type: 'string', required: true, description: 'Natural-language query.' },
+      dataset_ids: {
+        type: 'array',
+        items: { type: 'string' },
+        description: 'Restrict to these dataset ids, overriding the conversation default.',
+      },
+      document_ids: { type: 'array', items: { type: 'string' }, description: 'Restrict to these document ids.' },
+      page: { type: 'integer', description: 'Result page, default 1.' },
+      page_size: { type: 'integer', description: 'Chunks per page, default 10, max 100.' },
+      similarity_threshold: { type: 'number', description: '0.0-1.0, default 0.2.' },
+      vector_similarity_weight: { type: 'number', description: '0.0-1.0, default 0.3.' },
+    },
+    output: { schema: { type: 'object' }, render: renderJson },
+    timeoutMs: 60000,
+    async execute(args, exec) {
+      const question = typeof args.question === 'string' ? args.question.trim() : ''
+      if (question.length === 0) throw new Error('question is required')
+      const explicit = Array.isArray(args.dataset_ids)
+        ? args.dataset_ids.filter((id) => typeof id === 'string' && id.length > 0)
+        : []
+      const scope = await resolveDatasetIds(explicit, sessionOf(exec))
+      if (scope.ids.length === 0) {
+        throw new Error(
+          scope.source === 'session'
+            ? 'this conversation selects no knowledge base; tick at least one to search'
+            : scope.source === 'argument'
+              ? 'none of the given dataset_ids is readable with the configured API key'
+              : 'no RAGFlow dataset is readable with the configured API key',
+        )
+      }
+      const key = await apiKey()
+      if (key.length === 0) {
+        throw new Error('RAGFLOW_API_KEY is neither in the Host environment nor in the Windows user environment.')
+      }
+      const body = {
+        question,
+        dataset_ids: scope.ids,
+        page: typeof args.page === 'number' ? args.page : 1,
+        page_size: typeof args.page_size === 'number' ? Math.min(args.page_size, 100) : 10,
+        similarity_threshold: typeof args.similarity_threshold === 'number' ? args.similarity_threshold : 0.2,
+        vector_similarity_weight: typeof args.vector_similarity_weight === 'number' ? args.vector_similarity_weight : 0.3,
+      }
+      if (Array.isArray(args.document_ids) && args.document_ids.length > 0) body.document_ids = args.document_ids
+      const response = await apiCallJson('POST', '/api/v1/retrieval', key, body, exec.signal)
+      if (response.code !== 0) throw new Error('RAGFlow error ' + String(response.code) + ': ' + String(response.message))
+      const data = response.data || {}
+      const chunks = (Array.isArray(data.chunks) ? data.chunks : []).map((chunk, index) => ({
+        citation_id: index + 1,
+        source_file: chunk.document_keyword || chunk.docnm_kwd || chunk.document_id || 'unknown',
+        score: chunk.similarity,
+        chunk_text: String(chunk.content || '').slice(0, 600),
+      }))
+      return {
+        query: question,
+        dataset_ids: scope.ids,
+        dataset_source: scope.source,
+        total: data.total,
+        returned: chunks.length,
+        results: chunks,
+      }
+    },
+  })
 }

@@ -1,14 +1,25 @@
 # RAG-tool
 
-把 **RAGFlow 知识库**接进支持 MCP 协议的 AI 客户端（DeepSeek Harness / OpenCode / Codex / Claude Desktop 等），
-并提供按会话勾选知识库的界面。
+把 **RAGFlow 知识库**接进 AI 应用。两种接法，按客户端选：
+
+**A. 通用 MCP 桥接**（OpenCode / Codex / Claude Desktop 等任何支持 MCP 的客户端）
 
 ```
 AI 客户端  ──stdio MCP──▶  ragflow-mcp/server.cjs  ──REST──▶  RAGFlow
-                                    ▲
-                          dsh-ragflow-settings
-                       （DSH 插件：全局默认 + 会话级勾选）
 ```
+
+**B. DeepSeek Harness 宿主插件**（真正能按会话隔离）
+
+```
+DSH 宿主  ──工具调用(带 exec.agent.id)──▶  dsh-ragflow-settings  ──REST──▶  RAGFlow
+                    ▲
+        插件 UI（全局默认 + 本会话勾选）
+```
+
+> **为什么 DSH 用 B 不用 A**：MCP 桥接是**单进程共享**的，且 `dsh-mcp-client` 会用
+> `scrubbedParentEnv()` 丢弃父进程的 `DSH_*` 变量，子进程永远不知道是哪个会话在问。
+> 宿主工具的 `execute(args, exec)` 直接带 `exec.agent.id`（即 SessionId），
+> 会话级勾选才能真的生效。详见第二节。
 
 ---
 
@@ -73,6 +84,7 @@ Windows 路径记得转义：`"D:\\tools\\ragflow-mcp\\server.cjs"`
 | `ragflow_list_datasets` | `page`, `page_size` | 列出可访问的知识库 |
 
 `dataset_ids` 省略时的行为：优先用 DSH 插件写入的全局选择，其次检索全部可访问知识库。
+（若客户端是 DSH，请改用方案 B 的宿主工具 —— 那套才支持按会话隔离。）
 
 > **注意**：RAGFlow v0.25 要求 `dataset_ids` 非空（空数组会返回 `code 102`）。
 > 桥接已内置该兼容处理——省略时自动列出全部数据集再检索。
@@ -84,7 +96,35 @@ Windows 路径记得转义：`"D:\\tools\\ragflow-mcp\\server.cjs"`
 只对 DSH 有意义，其他客户端不需要。
 
 - **插件页卡片**：设置全局默认勾选哪些知识库
-- **输入框工具栏按钮**：在权限选择器旁，按会话勾选知识库
+- **输入框工具栏按钮**：在权限选择器旁，按会话勾选知识库（**改完立即生效，无需重启**）
+- **两个宿主工具**：`ragflow_list_datasets` / `ragflow_retrieval`（无 `mcp__` 前缀，宿主直连 REST）
+
+### 为什么必须是宿主工具
+
+会话级勾选要知道「是哪个会话在问」。MCP 桥接做不到，三层原因：
+
+1. 一个 DSH Host 只 spawn **一个** stdio 子进程，所有会话共用；
+2. `@deepseek-ai/dsh-mcp-client` 的 `buildChildEnv(config.env) = { ...scrubbedParentEnv(), ...extra }`，
+   `scrubbedParentEnv()` **丢弃 `DSH_*` 变量**，子进程拿不到 `DSH_SESSION_ID`；
+3. 会话 id 也不在 MCP 协议调用参数里。
+
+宿主工具则直接带 `exec.agent.id`（类型 `SessionId`，形如 `session-<uuid>`），
+正是会话选择文件的键。所以本包同时是「设置 UI」和「检索工具」的提供者。
+
+**本机 Harness 已不再挂 MCP 桥接**：`~/.dsh/cordis.patch.yml` 里 `mcp-ragflow` 那一行
+`disabled: true`。`ragflow-mcp/server.cjs` 仍然保留给上面的方案 A 使用。
+
+### 检索范围优先级
+
+工具省略 `dataset_ids` 时：
+
+1. **显式参数** `dataset_ids` —— 覆盖一切
+2. **本会话选择** —— 该 Session 有条目就用它（**空数组 = 什么都不检索**，不退回全局）
+3. **全局默认** —— 插件页卡片保存的 `datasetIds`
+4. **全部可访问** —— 以上都没有时
+
+返回值里 `dataset_source`（`argument`/`session`/`global`/`all`）就是本次实际用到的规则，
+`dataset_ids` 是实际检索的 id 列表。每层拿到的 id 都会先与「当前 Key 可访问的数据集」求交集。
 
 ### 安装
 
@@ -115,17 +155,32 @@ skipping profile bundle "@local/dsh-ragflow-settings": SyntaxError: Unexpected t
 
 **回退语义**：会话未设置 → 继承全局默认；全局也没有 → 检索全部；会话勾选为空数组 → 该会话不检索。
 
+写入用临时文件 + rename；会话文件的读-改-写有串行锁，避免并发 POST 互相覆盖。
+
+### 路由
+
+| 方法 | 路径 | 作用 |
+|---|---|---|
+| GET | `/ragflow-settings/state` | 可访问数据集 + 全局默认选择 |
+| POST | `/ragflow-settings/selection` | 保存全局默认选择 |
+| GET | `/ragflow-settings/session?sessionId=` | 该会话的选择、是否继承、有效 id |
+| POST | `/ragflow-settings/session` | 保存该会话的选择（空数组 = 什么都不检索） |
+
+宿主半边 `inject = ['webServer', 'tools']`。
+
 ### 已知限制
 
-会话级按钮的选择**不会自动传导给模型**。`dsh-mcp-client` 启动子进程时会剥除 `DSH_*`
-环境变量，桥接进程拿不到 sessionId，无法知道当前是哪个会话在检索。
-
-实际流程：按钮写文件 → 模型读文件 → 调用时显式传 `dataset_ids`。
-要做到完全自动，需另写原生工具插件（`ctx.tools.register`），它能直接拿到 agent 上下文。
+- 工具在 `apply()` 里注册，包清单与 bundle 只在启动时读取 —— **改动需要重启 Host**；
+  会话勾选的**内容**则不需要，每次调用实时读取文件。
 
 ---
 
 ## 三、在 DSH 里挂载桥接
+
+> ⚠️ **只在用方案 A（MCP 桥接）时才需要这一节。**
+> 装了 `dsh-ragflow-settings`（方案 B）后**不要再启用**这一行 ——
+> 宿主工具与 MCP 工具同名（`ragflow_retrieval` / `ragflow_list_datasets`），会冲突。
+> 想切回 MCP 请先停用 `@local/dsh-ragflow-settings`。
 
 在 `~/.dsh/cordis.patch.yml` 末尾追加。
 **必须用 `insert:`**——该层的 `- id: xxx` 只能改写**已存在**的条目，新增会报 `entry not found`。
@@ -134,6 +189,7 @@ skipping profile bundle "@local/dsh-ragflow-settings": SyntaxError: Unexpected t
 - insert:
     - id: mcp-ragflow
       name: '@deepseek-ai/dsh-mcp-client'
+      disabled: true   # ← 装了宿主插件后保持 true
       config:
         serverName: ragflow
         transport: stdio
@@ -154,6 +210,8 @@ skipping profile bundle "@local/dsh-ragflow-settings": SyntaxError: Unexpected t
 ## 四、更多文档
 
 - [RAGFlow接入-恢复说明.md](./RAGFlow接入-恢复说明.md) —— 完整恢复步骤、自检清单、卸载方法
+- [dsh-ragflow-settings/README.md](./dsh-ragflow-settings/README.md) —— 插件细节、路由、踩坑
+- [dsh-ragflow-settings/交付报告.md](./dsh-ragflow-settings/交付报告.md) —— 会话级检索的验收实证
 
 ---
 
