@@ -31,7 +31,11 @@ RAGFlow 从 **v0.26** 起才提供内置 MCP 端点（`POST /api/v1/mcp`）。�
 `ragflow-mcp/server.cjs` 用 **零依赖**（仅 Node 内置模块）的 stdio MCP 服务器填补这个缺口：
 它对客户端表现为标准 MCP server，对内调用 RAGFlow 的 REST 接口。
 
-**兼容性**：Node.js ≥ 18（用到内置 fetch 之外的模块均可）。已在 Node 24 实测。
+> 新部署请先看 **[RAGFlow接入-恢复说明.md](./RAGFlow接入-恢复说明.md)**：
+> 里面列了前提条件、两种接法的选择、可复制的安装步骤与自检清单。
+
+**兼容性**：MCP 桥接 Node.js ≥ 18（零依赖，只用内置模块），已在 Node 24 实测；
+DSH 插件要求 Node ≥ 22.19 与 DSH 0.2.2-rc.3 运行时。
 服务端已在 **RAGFlow v0.25.0-63-gfb95136f3** 验证。
 
 ---
@@ -202,8 +206,9 @@ skipping profile bundle "@local/dsh-ragflow-settings": SyntaxError: Unexpected t
         failOnStartupError: false
 ```
 
-依赖：`@deepseek-ai/dsh-mcp-client@0.2.2-rc.1`（需与 DSH 运行时版本一致）。
-注意 npm 的 `latest` 标签指向过期的 `0.0.1-rc.1`，安装时必须钉死版本号。
+依赖：`@deepseek-ai/dsh-mcp-client` **必须与 DSH 运行时版本一致**（本文验证于
+`0.2.2-rc.3`）。npm 的 `latest` 标签指向过期的 `0.0.1-rc.1`，必须钉死版本号。
+可用 `dsh --version` 查当前运行时版本。
 
 ---
 
