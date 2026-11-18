@@ -433,6 +433,76 @@ function apiCallJson(method, path, key, body, signal, settings) {
   })
 }
 
+/** A fresh multipart boundary. */
+function multipartBoundary() {
+  return '----dshragflow' + Date.now().toString(16) + Math.random().toString(16).slice(2, 10)
+}
+
+/**
+ * Upload one text document to a dataset.
+ *
+ * RAGFlow's documents endpoint only accepts multipart/form-data, so a chat
+ * message has to become a file part before it can be stored.
+ * @param datasetId - target dataset.
+ * @param filename - name the document will carry.
+ * @param content - UTF-8 text.
+ * @param key - bearer credential.
+ * @param settings - connection settings.
+ * @param signal - cancellation.
+ * @returns the parsed RAGFlow response.
+ */
+function uploadTextDocument(datasetId, filename, content, key, settings, signal) {
+  return new Promise((resolve, reject) => {
+    const boundary = multipartBoundary()
+    const safeName = String(filename).replace(/[\r\n"]/g, '_')
+    const payload = Buffer.concat([
+      Buffer.from(
+        '--' + boundary + '\r\n'
+        + 'Content-Disposition: form-data; name="file"; filename="' + safeName + '"\r\n'
+        + 'Content-Type: text/markdown; charset=utf-8\r\n\r\n',
+        'utf8',
+      ),
+      Buffer.from(content, 'utf8'),
+      Buffer.from('\r\n--' + boundary + '--\r\n', 'utf8'),
+    ])
+    const url = new URL(baseUrl(settings) + '/api/v1/datasets/' + encodeURIComponent(datasetId) + '/documents')
+    const transport = url.protocol === 'https:' ? https : http
+    const req = transport.request(
+      {
+        hostname: url.hostname,
+        port: url.port || (url.protocol === 'https:' ? 443 : 80),
+        path: url.pathname,
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer ' + key,
+          'content-type': 'multipart/form-data; boundary=' + boundary,
+          'content-length': payload.length,
+        },
+        timeout: settings !== undefined && settings.timeoutMs !== undefined ? settings.timeoutMs : 30000,
+        signal,
+      },
+      (res) => {
+        let text = ''
+        res.on('data', (chunk) => {
+          text += chunk
+        })
+        res.on('end', () => {
+          try {
+            resolve(JSON.parse(text))
+          } catch {
+            reject(new Error('RAGFlow returned non-JSON (' + String(res.statusCode) + '): ' + text.slice(0, 300)))
+          }
+        })
+      },
+    )
+    req.on('timeout', () => {
+      req.destroy(new Error('RAGFlow upload timed out'))
+    })
+    req.on('error', reject)
+    req.end(payload)
+  })
+}
+
 /**
  * Which datasets one retrieval searches, and why.
  *
@@ -913,6 +983,101 @@ function registerTools(ctx) {
         total: data.total,
         returned: chunks.length,
         results: chunks,
+      }
+    },
+  })
+
+  ctx.tools.register({
+    name: 'ragflow_add_document',
+    description:
+      'Store a piece of text as a new document in a RAGFlow knowledge base and start indexing it. '
+      + 'Use this only when the user explicitly asks to save something into a knowledge base: name the '
+      + 'target dataset plainly and confirm which one before writing. dataset_id is required — never '
+      + 'guess it from the current conversation. Indexing runs asynchronously on the RAGFlow side, so '
+      + 'the document is not searchable the instant this returns.',
+    parameters: {
+      dataset_id: {
+        type: 'string',
+        required: true,
+        description: 'Target knowledge-base id, as reported by ragflow_list_datasets.',
+      },
+      content: { type: 'string', required: true, description: 'UTF-8 text to store.' },
+      title: {
+        type: 'string',
+        description: 'Document name shown in RAGFlow; defaults to a timestamped name.',
+      },
+    },
+    output: { schema: { type: 'object' }, render: renderJson },
+    timeoutMs: 120000,
+    async execute(args, exec) {
+      const datasetId = typeof args.dataset_id === 'string' ? args.dataset_id.trim() : ''
+      if (datasetId.length === 0) throw new Error('dataset_id is required')
+      const content = typeof args.content === 'string' ? args.content : ''
+      if (content.trim().length === 0) throw new Error('content is required')
+
+      const settings = await readSettings()
+      const key = await apiKey(settings)
+      if (key.length === 0) {
+        throw new Error(
+          'no RAGFlow API key is configured: fill it in on the RAGFlow plugin page, or set RAGFLOW_API_KEY.',
+        )
+      }
+
+      // Refuse an id the key cannot see, so a typo cannot create a stray dataset.
+      const accessible = await listDatasets()
+      const target = accessible.find((row) => row.id === datasetId)
+      if (target === undefined) {
+        throw new Error(
+          'no readable knowledge base with id ' + datasetId
+          + '; call ragflow_list_datasets for the ids this key can write to',
+        )
+      }
+
+      const rawTitle = typeof args.title === 'string' ? args.title.trim() : ''
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-').replace('Z', '')
+      const base = rawTitle.length > 0 ? rawTitle : 'note-' + stamp
+      const filename = (/\.(md|txt|markdown)$/i.test(base) ? base : base + '.md').replace(/[\\/:*?"<>|]/g, '_')
+
+      const uploaded = await uploadTextDocument(datasetId, filename, content, key, settings, exec.signal)
+      if (uploaded.code !== 0) {
+        throw new Error('RAGFlow refused the upload: ' + String(uploaded.message || uploaded.code))
+      }
+      const created = Array.isArray(uploaded.data) ? uploaded.data : []
+      const documentIds = created.map((row) => String(row && row.id)).filter((id) => id.length > 0)
+
+      // Chunking is a separate call; a failure here leaves the document uploaded.
+      let indexed = false
+      let indexError = ''
+      if (documentIds.length > 0) {
+        try {
+          const parsed = await apiCallJson(
+            'POST',
+            '/api/v1/datasets/' + encodeURIComponent(datasetId) + '/chunks',
+            key,
+            { document_ids: documentIds },
+            exec.signal,
+            settings,
+          )
+          if (parsed.code === 0) indexed = true
+          else indexError = 'RAGFlow error ' + String(parsed.code) + ': ' + String(parsed.message)
+        } catch (error) {
+          indexError = String((error && error.message) || error)
+        }
+      }
+
+      return {
+        dataset_id: datasetId,
+        dataset_name: target.name,
+        documents: created.map((row) => ({
+          id: row && row.id,
+          name: row && row.name,
+          size: row && row.size,
+        })),
+        indexed,
+        ...(indexError.length > 0 ? { index_error: indexError } : {}),
+        note: indexed
+          ? 'saved and chunking started; searchable once RAGFlow finishes indexing'
+          : 'saved, but chunking did not start — run another parse from the RAGFlow UI',
       }
     },
   })

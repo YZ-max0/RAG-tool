@@ -64,12 +64,30 @@ API Key   粘贴
 
 连接没测通之前，知识库勾选区是锁住的，免得对着一堆注定用不了的选项点。
 
+### 对话里直接写库（方案 B · v0.5.0）
+
+不用打开 RAGFlow 网页，直接说「把这段排查结论存进《运维手册》」：
+
+```
+> 把刚才的排查结论存进「运维手册」
+
+✔ 已写入 运维手册 / 排查结论.md
+  已提交切块，索引完成后可检索
+```
+
+三道保险：
+
+- `dataset_id` 必须在 `ragflow_list_datasets` 的返回里，猜错或打错会被拒
+- **没有删除接口** —— 写进去的要删，去 RAGFlow 网页删
+- 切块是异步的，`indexed: true` 只代表已提交
+
 ### 对外暴露的能力
 
 | 类型 | 名称 | 说明 |
 |---|---|---|
 | 工具 | `ragflow_retrieval` | 语义检索，参数 `question` / `dataset_ids` / `document_ids` / `page` / `page_size` / `similarity_threshold` / `vector_similarity_weight` |
 | 工具 | `ragflow_list_datasets` | 列出可访问的知识库 |
+| 工具 | `ragflow_add_document` | 把一段文本存进指定知识库并触发切块 |
 | 界面 | 插件页卡片 | 连接配置 + 全局默认勾选 |
 | 界面 | 输入框旁按钮 | 本会话勾选 |
 

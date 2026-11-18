@@ -8,7 +8,7 @@
 - 卡片：勾选全局默认知识库，落到 `<DSH_HOME>/ragflow-settings.json`。
 - 输入框右侧的知识库按钮：勾选**本会话**检索哪些知识库，落到
   `<DSH_HOME>/ragflow-session-selection.json`，改完立即生效、无需重启。
-- 工具：`ragflow_list_datasets` / `ragflow_retrieval`，由宿主直接调 RAGFlow REST。
+- 工具：`ragflow_list_datasets` / `ragflow_retrieval` / `ragflow_add_document`，由宿主直接调 RAGFlow REST。
 
 ## 配置从哪来（优先级从高到低）
 
@@ -68,6 +68,25 @@
 返回值里的 `dataset_source` 就是本次实际用到的规则
 （`argument` / `session` / `global` / `all`），`dataset_ids` 是实际检索的 id 列表。
 任何一层拿到的 id 都会先与「当前 API Key 可访问的数据集」求交集，未知 id 被丢弃。
+
+## 写入（v0.5.0）
+
+`ragflow_add_document` 让模型把一段文本存进知识库：对话里说「把这段结论存进某个库」
+即可，不必打开 RAGFlow 网页。
+
+实际调用（已实测）：
+
+```
+POST /api/v1/datasets/{id}/documents   (multipart)    → 上传为 .md 文档
+POST /api/v1/datasets/{id}/chunks      {document_ids} → 触发切块
+```
+
+**三道保险**：
+
+1. `dataset_id` 必填，且必须出现在 `ragflow_list_datasets` 的返回里 ——
+   防止模型猜错或打错 id 往陌生库写。实测传假 id 会被拒。
+2. **不提供删除接口**。写进去的东西要删，去 RAGFlow 网页删。
+3. 切块是异步的，工具返回 `indexed: true` 只代表"已提交"，索引完成前检索不到。
 
 ## 路由
 
