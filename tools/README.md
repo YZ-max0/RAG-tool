@@ -36,6 +36,10 @@ node tools/mcp-probe.cjs ragflow-mcp/server.cjs tools/fixtures/calls-baseline.js
 附两个 fixture：`calls-baseline.json`（省略 `dataset_ids`，走默认范围）、
 `calls-override.json`（显式传 `dataset_ids`）。
 
+`calls-override.json` 里那个 `00000000000000000000000000000001` 是**故意编的占位 id**，
+用来演示"显式传参会覆盖默认范围"。RAGFlow 会把它过滤掉（查不到该库），
+这是预期结果。想真跑通，把那里换成你自己 `probe-ragflow.cjs` 打出来的 id。
+
 ### `probe-ragflow.cjs` — REST 连通性
 
 只打 `GET /api/v1/datasets`，用来确认 Key、地址、权限是否可用。

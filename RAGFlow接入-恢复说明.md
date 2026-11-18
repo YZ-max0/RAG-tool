@@ -255,13 +255,22 @@ cmd /c rmdir "$env:USERPROFILE\.dsh\profiles\desktop\node_modules\@local\dsh-rag
 
 ---
 
-## 七、示例知识库
+## 七、知识库长什么样
 
-| dataset_id | 名称 | 块数 |
-|---|---|---|
-| `e6567a92d8e911f1937961098168577a` | LDS-上下料-SOUL细节补充 | 47 |
-| `c2d3cbe0d8c311f1937961098168577a` | LDS-上下料规则 | 9 |
-| `b2f85832d6a511f1937961098168577a` | LDS-定时任务 | 5 |
-| `7a0202c08a6b11f18abb934b203a2e28` | LDS-用户与权限 | 16 |
+一个知识库 = 一个 `dataset_id` + 名字 + 若干文档。你要填的不是 id，而是
+**名字**——插件页那个列表就是 `GET /api/v1/datasets` 的原样输出：
 
-这是参考部署里的库，你自己的会不同。新增知识库无需改配置，列表和按钮自动读到。
+| 字段 | 示例 |
+|---|---|
+| `id` | 32 位十六进制，RAGFlow 自动生成，**你不用手填** |
+| `name` | 你在 RAGFlow 里起的名字 |
+| `document_count` | 该库下的文档数 |
+| `chunk_count` | 切分后的块数 |
+
+勾选的知识库以 id 形式存进状态文件；新增知识库无需改配置，列表和按钮会自动读到。
+
+想知道库里有哪些 id，跑一句：
+
+```powershell
+node tools/probe-ragflow.cjs
+```
