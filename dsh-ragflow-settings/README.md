@@ -64,7 +64,10 @@
 
 包目录需出现在 profile 的 `node_modules` 与 `dsh.profile.bundles` 中：
 
-1. 复制到 `<DSH_PROFILE_DIR>/node_modules/@local/dsh-ragflow-settings/`
+1. 建 junction（**不要复制**，原因见下方踩坑记录）：
+   ```powershell
+   cmd /c mklink /J "<DSH_PROFILE_DIR>\node_modules\@local\dsh-ragflow-settings" "<本仓库>\dsh-ragflow-settings"
+   ```
 2. 在 `<DSH_PROFILE_DIR>/package.json` 的 `dependencies` 加
    `"@local/dsh-ragflow-settings": "file:<包路径>"`，
    在 `dsh.profile.bundles` 末尾加 `"@local/dsh-ragflow-settings"`
