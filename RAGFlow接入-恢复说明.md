@@ -204,7 +204,7 @@ skipping profile bundle "@local/dsh-ragflow-settings": SyntaxError: Unexpected t
 **① 桥接能独立跑通**（方案 A / B 都建议先验这一步）
 
 ```powershell
-node -e "const{spawn}=require('child_process');const p=spawn(process.execPath,['<本仓库>/ragflow-mcp/server.cjs'],{stdio:['pipe','pipe','pipe']});let o='';p.stdout.on('data',d=>o+=d);p.stdin.write(JSON.stringify({jsonrpc:'2.0',id:1,method:'initialize',params:{protocolVersion:'2025-06-18',capabilities:{},clientInfo:{name:'t',version:'1'}}})+'`n');setTimeout(()=>{p.kill();console.log(o.slice(0,200))},1500)"
+node -e "const{spawn}=require('child_process');const p=spawn(process.execPath,['<本仓库>/ragflow-mcp/server.cjs'],{stdio:['pipe','pipe','pipe']});let o='';p.stdout.on('data',d=>o+=d);p.stdin.write(JSON.stringify({jsonrpc:'2.0',id:1,method:'initialize',params:{protocolVersion:'2025-06-18',capabilities:{},clientInfo:{name:'t',version:'1'}}})+String.fromCharCode(10));setTimeout(()=>{p.kill();console.log(o)||process.exit(0)},1500)"
 ```
 
 判据：输出含 `"name":"ragflow"`。
