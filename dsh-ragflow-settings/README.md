@@ -1,11 +1,31 @@
 # @local/dsh-ragflow-settings
 
-两件事：在 DSH「插件」页放一张「RAGFlow 知识库」卡片，以及**在宿主里注册真正能按会话检索的工具**。
+装上就能用，不用碰环境变量或改配置文件：在 DSH「插件」页填 RAGFlow 地址与 API Key，
+测试连接通过后勾选知识库即可。
 
+- **连接配置**（新增）：地址 / API Key / 超时，落到 `<DSH_HOME>/ragflow-config.json`
+  （有 DSH 凭据服务时 Key 存那里，文件里只留引用）。
 - 卡片：勾选全局默认知识库，落到 `<DSH_HOME>/ragflow-settings.json`。
 - 输入框右侧的知识库按钮：勾选**本会话**检索哪些知识库，落到
   `<DSH_HOME>/ragflow-session-selection.json`，改完立即生效、无需重启。
 - 工具：`ragflow_list_datasets` / `ragflow_retrieval`，由宿主直接调 RAGFlow REST。
+
+## 配置从哪来（优先级从高到低）
+
+| 项 | 第一顺位 | 第二顺位 | 兜底 |
+|---|---|---|---|
+| 服务地址 | 插件页保存的地址 | `RAGFLOW_BASE_URL` | `http://localhost:8060` |
+| API Key | 插件页保存的 Key | `RAGFLOW_API_KEY`（进程 → Windows 用户环境） | 无 |
+
+所以在本次改版之前靠环境变量跑通的部署**不需要改任何东西**；在插件页保存过就以页面为准。
+插件页留空 Key 表示"不修改"，传空串则是清除（清除后回落到环境变量）。
+
+### API Key 存在哪
+
+插件启动时若发现 Host 挂了 `credentials` 服务（`@deepseek-ai/dsh-credentials-local`），
+就把 Key 交给它保管，`ragflow-config.json` 里只写 `{"apiKeyRef":"ragflow"}`；
+没有该服务时退化为内联 `{"apiKey":"…"}`。
+**无论哪种，读配置的接口都只返回掩码**（如 `ragf…mHzA`）与来源，从不回传明文。
 
 ## 为什么不再走 MCP
 
@@ -53,10 +73,16 @@
 
 | 方法 | 路径 | 作用 |
 | --- | --- | --- |
+| GET | `/ragflow-settings/config` | 连接配置（Key 只返回掩码与来源） |
+| POST | `/ragflow-settings/config` | 保存地址 / Key / 超时 |
+| POST | `/ragflow-settings/test` | 用给定或已存的参数试连一次，不保存 |
 | GET | `/ragflow-settings/state` | 可访问数据集 + 全局默认选择 |
 | POST | `/ragflow-settings/selection` | 保存全局默认选择 |
 | GET | `/ragflow-settings/session?sessionId=` | 该会话的选择、是否继承、有效 id |
 | POST | `/ragflow-settings/session` | 保存该会话的选择（空数组 = 什么都不检索） |
+
+`/test` 可以带未保存的 `baseUrl` / `apiKey`，所以界面能在"保存"之前先验通，
+用户不用保存后跑去对话里试错。连接未通过时知识库勾选区是锁住的。
 
 写盘用临时文件 + rename；会话文件的读-改-写有串行锁，避免并发 POST 互相覆盖。
 
@@ -73,13 +99,16 @@
    在 `dsh.profile.bundles` 末尾加 `"@local/dsh-ragflow-settings"`
 3. 重启 DSH（包清单、bundle、以及工具注册只在启动时读取）
 
+装好后打开「插件」页的「RAGFlow 知识库」卡片，填地址与 API Key，点「测试连接」通过即可用。
+**不需要再设环境变量。**
+
 改 `lib/client.js` 需要重启 Host 才会被重新打包下发；改 `lib/index.js`
 同样需要重启（工具在 `apply()` 里注册）。
 
 ## 凭据来源
 
-`RAGFLOW_API_KEY` 优先取进程环境变量；取不到时回退读取 Windows 用户环境
-（`HKCU\Environment`），因为早于该变量设置的 DSH 进程不会继承它。
+按上文「配置从哪来」的顺序解析。环境变量这一档先读进程环境，再回退读 Windows
+用户环境（`HKCU\Environment`），因为早于该变量设置的 DSH 进程不会继承它。
 
 ## 踩坑记录
 

@@ -48,7 +48,25 @@ window.__ModuleLoader__.load({
       sessionEmpty: '不检索任何知识库',
       sessionSaveFailed: '保存失败',
       sessionLoadFailed: '读取失败',
-      sessionClose: '关闭'
+      sessionClose: '关闭',
+      connectionTitle: '连接到 RAGFlow',
+      serviceUrl: '服务地址',
+      apiKey: 'API Key',
+      apiKeyKeep: '已保存（{masked}），留空则不修改',
+      apiKeyEmpty: '粘贴 RAGFlow 的 API Key',
+      apiKeyStored: '当前使用：{masked}（来自{source}）',
+      apiKeyMissing: '尚未配置 API Key',
+      sourcePluginPage: '本页',
+      sourceCredentialProvider: 'DSH 凭据服务',
+      sourceEnvironment: '环境变量',
+      sourceWindowsEnv: 'Windows 用户环境变量',
+      sourceNone: '无',
+      testConnection: '测试连接',
+      testing: '正在连接…',
+      testOk: '连接成功，可访问 {count} 个知识库',
+      testFailed: '连接失败',
+      saveConnection: '保存连接',
+      connectFirst: '请先填写地址与 API Key 并测试连接，通过后才能勾选知识库。'
     }
 
     const en = {
@@ -78,13 +96,38 @@ window.__ModuleLoader__.load({
       sessionEmpty: 'Searches nothing',
       sessionSaveFailed: 'Save failed',
       sessionLoadFailed: 'Could not load',
-      sessionClose: 'Close'
+      sessionClose: 'Close',
+      connectionTitle: 'Connect to RAGFlow',
+      serviceUrl: 'Service URL',
+      apiKey: 'API key',
+      apiKeyKeep: 'Saved ({masked}); leave blank to keep it',
+      apiKeyEmpty: 'Paste the RAGFlow API key',
+      apiKeyStored: 'Using {masked} (from {source})',
+      apiKeyMissing: 'No API key configured yet',
+      sourcePluginPage: 'this page',
+      sourceCredentialProvider: 'the DSH credential store',
+      sourceEnvironment: 'the environment',
+      sourceWindowsEnv: 'the Windows user environment',
+      sourceNone: 'nowhere',
+      testConnection: 'Test connection',
+      testing: 'Connecting…',
+      testOk: 'Connected — {count} knowledge bases reachable',
+      testFailed: 'Connection failed',
+      saveConnection: 'Save connection',
+      connectFirst: 'Fill in the address and API key, then test the connection before picking knowledge bases.'
     }
 
     const CSS = [
       '.dsh-ragflow{display:flex;flex-direction:column;gap:12px;color:var(--dsw-alias-label-primary);font-size:13px;line-height:20px}',
       '.dsh-ragflow-hint{margin:0;color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:18px}',
       '.dsh-ragflow-bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px}',
+      '.dsh-ragflow-conn{display:flex;flex-direction:column;gap:8px;padding:10px;border:.5px solid var(--dsw-alias-border-l4);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-3)}',
+      '.dsh-ragflow-conn-title{margin:0;font-size:12px;font-weight:600;color:var(--dsw-alias-label-secondary)}',
+      '.dsh-ragflow-field{display:flex;flex-direction:column;gap:4px}',
+      '.dsh-ragflow-field-label{font-size:12px;color:var(--dsw-alias-label-tertiary)}',
+      '.dsh-ragflow-input{width:100%;box-sizing:border-box;padding:5px 8px;border:.5px solid var(--dsw-alias-border-l4);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-2);color:var(--dsw-alias-label-primary);font-size:12px;font-family:inherit}',
+      '.dsh-ragflow-input:focus{outline:none;border-color:var(--dsw-alias-border-l3)}',
+      '.dsh-ragflow-conn-meta{margin:0;font-size:11px;color:var(--dsw-alias-label-tertiary)}',
       '.dsh-ragflow-btn{border:.5px solid var(--dsw-alias-border-l4);border-radius:var(--dsw-radius-md);background:var(--dsw-alias-bg-layer-3);color:var(--dsw-alias-label-primary);font:inherit;font-size:12.5px;height:28px;padding:0 12px;cursor:pointer}',
       '.dsh-ragflow-btn:hover:not(:disabled){background:var(--dsw-alias-interactive-bg-hover)}',
       '.dsh-ragflow-btn:disabled{opacity:.55;cursor:default}',
@@ -159,12 +202,59 @@ window.__ModuleLoader__.load({
       return await response.json()
     }
 
+    async function readConfig() {
+      const response = await fetch('/ragflow-settings/config', { headers: { accept: 'application/json' } })
+      return await response.json()
+    }
+
+    async function writeConfig(patch) {
+      const response = await fetch('/ragflow-settings/config', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(patch)
+      })
+      return await response.json()
+    }
+
+    async function probeConfig(patch) {
+      const response = await fetch('/ragflow-settings/test', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(patch)
+      })
+      return await response.json()
+    }
+
     function RagflowCard(props) {
       const t = props.t
       const view = props.view
       const [state, setState] = React.useState({ status: 'loading', datasets: [], selected: [], configPath: '', error: '' })
       const [draft, setDraft] = React.useState([])
       const [saveState, setSaveState] = React.useState('idle')
+      const [config, setConfig] = React.useState({ status: 'loading', baseUrl: '', timeoutMs: 30000, apiKeyConfigured: false, apiKeySource: 'none', apiKeyMasked: '', credentialProvider: false, settingsPath: '', error: '' })
+      const [connDraft, setConnDraft] = React.useState({ baseUrl: '', apiKey: '' })
+      const [connState, setConnState] = React.useState({ saving: false, testing: false, result: null, error: '' })
+
+      const loadConfig = React.useCallback(async () => {
+        try {
+          const data = await readConfig()
+          if (data.ok !== true) throw new Error(String(data.error || 'request failed'))
+          setConfig({
+            status: 'ready',
+            baseUrl: String(data.baseUrl || ''),
+            timeoutMs: Number(data.timeoutMs) || 30000,
+            apiKeyConfigured: data.apiKeyConfigured === true,
+            apiKeySource: String(data.apiKeySource || 'none'),
+            apiKeyMasked: String(data.apiKeyMasked || ''),
+            credentialProvider: data.credentialProvider === true,
+            settingsPath: String(data.settingsPath || ''),
+            error: ''
+          })
+          setConnDraft((previous) => ({ ...previous, baseUrl: String(data.baseUrl || '') }))
+        } catch (error) {
+          setConfig((previous) => ({ ...previous, status: 'error', error: String((error && error.message) || error) }))
+        }
+      }, [])
 
       const load = React.useCallback(async () => {
         setState((previous) => ({ ...previous, status: 'loading', error: '' }))
@@ -187,8 +277,9 @@ window.__ModuleLoader__.load({
 
       React.useEffect(() => {
         if (view === 'summary') return
+        void loadConfig()
         void load()
-      }, [view, load])
+      }, [view, load, loadConfig])
 
       if (view === 'summary') {
         if (state.status !== 'ready') return h('span', null, t('description'))
@@ -198,6 +289,38 @@ window.__ModuleLoader__.load({
       const toggle = (id) => {
         setSaveState('idle')
         setDraft((previous) => (previous.includes(id) ? previous.filter((value) => value !== id) : [...previous, id]))
+      }
+
+      const connected = connState.result !== null && connState.result.ok === true
+
+      const testConnection = async () => {
+        setConnState({ saving: false, testing: true, result: null, error: '' })
+        try {
+          const patch = { baseUrl: connDraft.baseUrl }
+          if (connDraft.apiKey.length > 0) patch.apiKey = connDraft.apiKey
+          const result = await probeConfig(patch)
+          setConnState({ saving: false, testing: false, result, error: '' })
+          // A passing probe unlocks the list; pull it now so the user sees it at once.
+          if (result && result.ok === true) await load()
+        } catch (error) {
+          setConnState({ saving: false, testing: false, result: null, error: String((error && error.message) || error) })
+        }
+      }
+
+      const saveConnection = async () => {
+        setConnState((previous) => ({ ...previous, saving: true, error: '' }))
+        try {
+          const patch = { baseUrl: connDraft.baseUrl }
+          if (connDraft.apiKey.length > 0) patch.apiKey = connDraft.apiKey
+          const result = await writeConfig(patch)
+          if (result.ok !== true) throw new Error(String(result.error || 'save failed'))
+          setConnDraft({ baseUrl: String(result.baseUrl || connDraft.baseUrl), apiKey: '' })
+          setConnState({ saving: false, testing: false, result: null, error: '' })
+          await loadConfig()
+          await load()
+        } catch (error) {
+          setConnState((previous) => ({ ...previous, saving: false, error: String((error && error.message) || error) }))
+        }
       }
 
       const save = async () => {
@@ -248,9 +371,110 @@ window.__ModuleLoader__.load({
       else if (state.status === 'error')
         statusLine = h('p', { className: 'dsh-ragflow-status', 'data-tone': 'error' }, String(t('loadFailed')) + ': ' + state.error)
 
+      const sourceLabel = {
+        'plugin-page': t('sourcePluginPage'),
+        'credential-provider': t('sourceCredentialProvider'),
+        environment: t('sourceEnvironment'),
+        'windows-user-environment': t('sourceWindowsEnv'),
+        none: t('sourceNone')
+      }[config.apiKeySource] || String(config.apiKeySource)
+
+      let probeLine = null
+      if (connState.testing) probeLine = h('p', { className: 'dsh-ragflow-status' }, String(t('testing')))
+      else if (connState.error) probeLine = h('p', { className: 'dsh-ragflow-status', 'data-tone': 'error' }, connState.error)
+      else if (connState.result && connState.result.ok === true)
+        probeLine = h(
+          'p',
+          { className: 'dsh-ragflow-status', 'data-tone': 'success' },
+          String(t('testOk')).replace('{count}', String(connState.result.datasetCount))
+        )
+      else if (connState.result && connState.result.ok !== true)
+        probeLine = h('p', { className: 'dsh-ragflow-status', 'data-tone': 'error' }, String(t('testFailed')) + ': ' + String(connState.result.error || ''))
+
+      const configSection = h(
+        'div',
+        { className: 'dsh-ragflow-conn' },
+        h('p', { className: 'dsh-ragflow-conn-title' }, String(t('connectionTitle'))),
+        h(
+          'label',
+          { className: 'dsh-ragflow-field' },
+          h('span', { className: 'dsh-ragflow-field-label' }, String(t('serviceUrl'))),
+          h('input', {
+            type: 'url',
+            className: 'dsh-ragflow-input',
+            'data-ragflow-field': 'baseUrl',
+            placeholder: 'http://localhost:8060',
+            value: connDraft.baseUrl,
+            onChange: (event) => {
+              setConnDraft((previous) => ({ ...previous, baseUrl: event.target.value }))
+              setConnState((previous) => ({ ...previous, result: null, error: '' }))
+            }
+          })
+        ),
+        h(
+          'label',
+          { className: 'dsh-ragflow-field' },
+          h('span', { className: 'dsh-ragflow-field-label' }, String(t('apiKey'))),
+          h('input', {
+            type: 'password',
+            className: 'dsh-ragflow-input',
+            'data-ragflow-field': 'apiKey',
+            placeholder: config.apiKeyConfigured
+              ? String(t('apiKeyKeep')).replace('{masked}', config.apiKeyMasked)
+              : String(t('apiKeyEmpty')),
+            value: connDraft.apiKey,
+            onChange: (event) => {
+              setConnDraft((previous) => ({ ...previous, apiKey: event.target.value }))
+              setConnState((previous) => ({ ...previous, result: null, error: '' }))
+            }
+          })
+        ),
+        h(
+          'p',
+          { className: 'dsh-ragflow-conn-meta' },
+          config.apiKeyConfigured
+            ? String(t('apiKeyStored')).replace('{masked}', config.apiKeyMasked).replace('{source}', sourceLabel)
+            : String(t('apiKeyMissing'))
+        ),
+        h(
+          'div',
+          { className: 'dsh-ragflow-bar' },
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'dsh-ragflow-btn',
+              'data-ragflow-action': 'test',
+              disabled: connState.testing || connState.saving || connDraft.baseUrl.trim().length === 0,
+              onClick: () => {
+                void testConnection()
+              }
+            },
+            String(connState.testing ? t('testing') : t('testConnection'))
+          ),
+          h(
+            'button',
+            {
+              type: 'button',
+              className: 'dsh-ragflow-btn',
+              'data-ragflow-action': 'save-connection',
+              'data-primary': true,
+              disabled: connState.saving || connState.testing || connDraft.baseUrl.trim().length === 0,
+              onClick: () => {
+                void saveConnection()
+              }
+            },
+            String(connState.saving ? t('saving') : t('saveConnection'))
+          )
+        ),
+        probeLine,
+        connected ? null : h('p', { className: 'dsh-ragflow-status' }, String(t('connectFirst')))
+      )
+
       return h(
         'div',
         { className: 'dsh-ragflow', 'data-ragflow-settings': true },
+        configSection,
         h('p', { className: 'dsh-ragflow-hint' }, String(t('hint'))),
         h(
           'div',
@@ -260,7 +484,7 @@ window.__ModuleLoader__.load({
             {
               type: 'button',
               className: 'dsh-ragflow-btn',
-              disabled: state.status !== 'ready',
+              disabled: state.status !== 'ready' || !connected,
               onClick: () => {
                 setSaveState('idle')
                 setDraft(state.datasets.map((row) => row.id))
@@ -273,7 +497,7 @@ window.__ModuleLoader__.load({
             {
               type: 'button',
               className: 'dsh-ragflow-btn',
-              disabled: state.status !== 'ready',
+              disabled: state.status !== 'ready' || !connected,
               onClick: () => {
                 setSaveState('idle')
                 setDraft([])
@@ -299,7 +523,7 @@ window.__ModuleLoader__.load({
               type: 'button',
               className: 'dsh-ragflow-btn',
               'data-primary': true,
-              disabled: state.status !== 'ready' || saveState === 'saving' || !dirty,
+              disabled: state.status !== 'ready' || !connected || saveState === 'saving' || !dirty,
               onClick: () => {
                 void save()
               }
@@ -308,9 +532,11 @@ window.__ModuleLoader__.load({
           )
         ),
         statusLine,
-        state.datasets.length === 0 && state.status === 'ready'
-          ? h('p', { className: 'dsh-ragflow-status' }, String(t('empty')))
-          : h('ul', { className: 'dsh-ragflow-list' }, rows),
+        connected
+          ? state.datasets.length === 0 && state.status === 'ready'
+            ? h('p', { className: 'dsh-ragflow-status' }, String(t('empty')))
+            : h('ul', { className: 'dsh-ragflow-list' }, rows)
+          : null,
         state.configPath.length > 0
           ? h('p', { className: 'dsh-ragflow-path' }, String(t('configPath')) + ': ' + state.configPath)
           : null

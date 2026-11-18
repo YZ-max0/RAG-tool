@@ -1,8 +1,8 @@
 {
   "name": "@local/dsh-ragflow-settings",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "private": true,
-  "description": "Session-scoped RAGFlow knowledge-base selection plus the Host ragflow_retrieval tools it drives.",
+  "description": "Connect to RAGFlow from the plugin page, then pick knowledge bases globally or per session; ships the Host retrieval tools.",
   "type": "module",
   "main": "lib/index.js",
   "exports": {

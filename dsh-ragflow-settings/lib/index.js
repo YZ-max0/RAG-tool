@@ -35,10 +35,13 @@ export const inject = ['webServer', 'tools']
 
 const CONFIG_FILE = 'ragflow-settings.json'
 const SESSION_FILE = 'ragflow-session-selection.json'
+const SETTINGS_FILE = 'ragflow-config.json'
 const API_PREFIX = '/ragflow-settings'
 /** Session ids are DSH-generated tokens; anything else is a caller bug, not a key. */
 const SESSION_ID_PATTERN = /^[A-Za-z0-9._:-]{1,200}$/
 const DEFAULT_BASE_URL = 'http://localhost:8060'
+/** Credential reference this plugin stores its key under in the DSH credential provider. */
+const CREDENTIAL_REF = 'ragflow'
 
 /** DSH home: the same resolution the MCP bridge uses, so both read one file. */
 function dshHome() {
@@ -55,6 +58,11 @@ function configPath() {
 /** Absolute path of the per-session override file. */
 function sessionPath() {
   return join(dshHome(), SESSION_FILE)
+}
+
+/** Absolute path of the connection settings written by the plugin page. */
+function settingsPath() {
+  return join(dshHome(), SETTINGS_FILE)
 }
 
 /**
@@ -80,15 +88,61 @@ async function readWindowsUserEnv(variable) {
   return ''
 }
 
+/**
+ * The connection settings saved by the plugin page.
+ *
+ * Every field is optional: an absent file means "fall back to the environment",
+ * which is how a deployment configured before this page existed keeps working.
+ * @returns the parsed settings, or an empty object when absent or unreadable.
+ */
+async function readSettings() {
+  try {
+    const parsed = JSON.parse(await readFile(settingsPath(), 'utf8'))
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+    const settings = {}
+    if (typeof parsed.baseUrl === 'string' && parsed.baseUrl.length > 0) settings.baseUrl = parsed.baseUrl
+    if (typeof parsed.timeoutMs === 'number' && Number.isFinite(parsed.timeoutMs)) settings.timeoutMs = parsed.timeoutMs
+    // The key may live inline (no credential provider) or behind a reference.
+    if (typeof parsed.apiKey === 'string' && parsed.apiKey.length > 0) settings.apiKey = parsed.apiKey
+    if (typeof parsed.apiKeyRef === 'string' && parsed.apiKeyRef.length > 0) settings.apiKeyRef = parsed.apiKeyRef
+    return settings
+  } catch {
+    return {}
+  }
+}
+
+/**
+ * Persist the connection settings atomically.
+ * @param settings - the complete settings object to store.
+ */
+async function writeSettings(settings) {
+  const target = settingsPath()
+  await mkdir(dshHome(), { recursive: true })
+  const payload = JSON.stringify(settings, null, 2) + '\n'
+  const temp = target + '.tmp-' + String(process.pid)
+  await writeFile(temp, payload, 'utf8')
+  await rename(temp, target)
+}
+
 /** Cached credential resolution; the fallback shells out to Windows once. */
 const credential = { settled: false, key: '', pending: undefined }
 
 /**
- * The RAGFlow API key: the Host process environment first (which is what the
- * MCP client row passes through), then the Windows user environment.
+ * The RAGFlow API key, most specific source first: the plugin page's saved key
+ * (inline or through the DSH credential provider), then the Host process
+ * environment, then the Windows user environment.
+ * @param settings - already-read connection settings.
  * @returns the key, or an empty string when no source supplies one.
  */
-async function apiKey() {
+async function apiKey(settings) {
+  const resolved = settings === undefined ? {} : settings
+  if (typeof resolved.apiKey === 'string' && resolved.apiKey.length > 0) return resolved.apiKey
+  if (typeof resolved.apiKeyRef === 'string' && resolved.apiKeyRef.length > 0) {
+    const fromProvider = await credentialProvider()?.resolve(resolved.apiKeyRef)
+    if (fromProvider !== undefined && typeof fromProvider.value === 'string' && fromProvider.value.length > 0) {
+      return fromProvider.value
+    }
+  }
   const fromEnv = process.env.RAGFLOW_API_KEY
   if (typeof fromEnv === 'string' && fromEnv.length > 0) return fromEnv
   if (credential.settled) return credential.key
@@ -103,8 +157,33 @@ async function apiKey() {
   return await credential.pending
 }
 
-/** The RAGFlow base URL, without a trailing slash. */
-function baseUrl() {
+/**
+ * The DSH credential provider, when the Host mounts one.
+ *
+ * Resolved on every use rather than captured at apply() time, the way
+ * @deepseek-ai/dsh-mcp-client does it: the provider is a separate plugin and
+ * may mount after this one.
+ * @returns the provider, or undefined on a Host that mounts no credential service.
+ */
+function credentialProvider() {
+  const ctx = pluginContext
+  if (ctx === undefined || typeof ctx.get !== 'function') return undefined
+  const provider = ctx.get('credentials')
+  return provider !== undefined && typeof provider.resolve === 'function' ? provider : undefined
+}
+
+/** The plugin context, kept so the credential provider can be looked up lazily. */
+let pluginContext
+
+/**
+ * The RAGFlow base URL, most specific source first: the plugin page's saved
+ * address, then the Host process environment, then the loopback default.
+ * @param settings - already-read connection settings.
+ * @returns the base URL without a trailing slash.
+ */
+function baseUrl(settings) {
+  const saved = settings === undefined ? undefined : settings.baseUrl
+  if (typeof saved === 'string' && saved.length > 0) return saved.replace(/\/+$/, '')
   const raw = process.env.RAGFLOW_BASE_URL
   const value = typeof raw === 'string' && raw.length > 0 ? raw : DEFAULT_BASE_URL
   return value.replace(/\/+$/, '')
@@ -115,15 +194,16 @@ function baseUrl() {
  * @param method - HTTP method.
  * @param path - path with query string.
  * @param key - bearer credential.
+ * @param settings - connection settings supplying the base URL and timeout.
  * @returns the parsed JSON response.
  */
-function apiCall(method, path, key) {
+function apiCall(method, path, key, settings) {
   return new Promise((resolve, reject) => {
     let url
     try {
-      url = new URL(baseUrl() + path)
+      url = new URL(baseUrl(settings) + path)
     } catch (error) {
-      reject(new Error('RAGFLOW_BASE_URL is not a valid URL: ' + String((error && error.message) || error)))
+      reject(new Error('the RAGFlow address is not a valid URL: ' + String((error && error.message) || error)))
       return
     }
     const transport = url.protocol === 'https:' ? https : http
@@ -134,7 +214,7 @@ function apiCall(method, path, key) {
         path: url.pathname + url.search,
         method,
         headers: { authorization: 'Bearer ' + key },
-        timeout: 30000,
+        timeout: settings !== undefined && settings.timeoutMs !== undefined ? settings.timeoutMs : 30000,
       },
       (res) => {
         let text = ''
@@ -163,13 +243,14 @@ function apiCall(method, path, key) {
  * @returns the public dataset rows.
  */
 async function listDatasets() {
-  const key = await apiKey()
+  const settings = await readSettings()
+  const key = await apiKey(settings)
   if (key.length === 0) {
     throw new Error(
-      'RAGFLOW_API_KEY is neither in the Host environment nor in the Windows user environment.',
+      'no RAGFlow API key is configured: fill it in on the RAGFlow plugin page, or set RAGFLOW_API_KEY.',
     )
   }
-  const response = await apiCall('GET', '/api/v1/datasets?page=1&page_size=100', key)
+  const response = await apiCall('GET', '/api/v1/datasets?page=1&page_size=100', key, settings)
   if (response.code !== 0) {
     throw new Error('RAGFlow error ' + String(response.code) + ': ' + String(response.message))
   }
@@ -308,11 +389,12 @@ async function writeSessionSelection(sessionId, datasetIds) {
  * @param key - bearer credential.
  * @param body - the JSON request body.
  * @param signal - cancellation forwarded to the socket.
+ * @param settings - connection settings supplying the base URL and timeout.
  * @returns the parsed JSON response.
  */
-function apiCallJson(method, path, key, body, signal) {
+function apiCallJson(method, path, key, body, signal, settings) {
   return new Promise((resolve, reject) => {
-    const url = new URL(baseUrl() + path)
+    const url = new URL(baseUrl(settings) + path)
     const payload = JSON.stringify(body)
     const transport = url.protocol === 'https:' ? https : http
     const req = transport.request(
@@ -326,7 +408,7 @@ function apiCallJson(method, path, key, body, signal) {
           'content-type': 'application/json',
           'content-length': Buffer.byteLength(payload),
         },
-        timeout: 30000,
+        timeout: settings !== undefined && settings.timeoutMs !== undefined ? settings.timeoutMs : 30000,
         signal,
       },
       (res) => {
@@ -409,6 +491,8 @@ function readBody(req) {
  * @param ctx - the plugin context carrying the web server service.
  */
 export function apply(ctx) {
+  pluginContext = ctx
+
   ctx.effect(
     () =>
       ctx.webServer.register({
@@ -531,7 +615,192 @@ export function apply(ctx) {
     'ragflow-settings: session selection route',
   )
 
+  registerConfigRoutes(ctx)
   registerTools(ctx)
+}
+
+/** Shape check for an http(s) address the user typed. */
+function normalizeBaseUrl(value) {
+  if (typeof value !== 'string') throw new Error('serviceUrl must be a string')
+  const trimmed = value.trim().replace(/\/+$/, '')
+  if (trimmed.length === 0) throw new Error('serviceUrl is required')
+  let parsed
+  try {
+    parsed = new URL(trimmed)
+  } catch {
+    throw new Error('serviceUrl is not a valid URL: ' + trimmed)
+  }
+  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+    throw new Error('serviceUrl must start with http:// or https://')
+  }
+  return trimmed
+}
+
+/** A masked form of a key: never the middle, only enough to recognise it. */
+function maskKey(value) {
+  if (typeof value !== 'string' || value.length === 0) return ''
+  if (value.length <= 8) return '****'
+  return value.slice(0, 4) + '…' + value.slice(-4)
+}
+
+/**
+ * Where the effective key comes from, for the settings page to report.
+ * @param settings - already-read connection settings.
+ * @returns a source tag and whether a key is available.
+ */
+async function keyStatus(settings) {
+  const key = await apiKey(settings)
+  if (key.length === 0) return { configured: false, source: 'none', masked: '' }
+  const source =
+    typeof settings.apiKey === 'string' && settings.apiKey.length > 0
+      ? 'plugin-page'
+      : typeof settings.apiKeyRef === 'string' && settings.apiKeyRef.length > 0
+        ? 'credential-provider'
+        : process.env.RAGFLOW_API_KEY !== undefined && process.env.RAGFLOW_API_KEY.length > 0
+          ? 'environment'
+          : 'windows-user-environment'
+  return { configured: true, source, masked: maskKey(key) }
+}
+
+/**
+ * Try one RAGFlow connection and report what happened, without saving anything.
+ * @param baseUrlValue - address to test.
+ * @param key - bearer credential to test.
+ * @param timeoutMs - request timeout.
+ * @returns datasets count on success, a readable error otherwise.
+ */
+async function probeConnection(baseUrlValue, key, timeoutMs) {
+  try {
+    const response = await apiCall('GET', '/api/v1/datasets?page=1&page_size=100', key, {
+      baseUrl: baseUrlValue,
+      timeoutMs,
+    })
+    if (response.code !== 0) {
+      return { ok: false, error: 'RAGFlow error ' + String(response.code) + ': ' + String(response.message) }
+    }
+    const rows = Array.isArray(response.data) ? response.data : []
+    return { ok: true, datasetCount: rows.length }
+  } catch (error) {
+    return { ok: false, error: String((error && error.message) || error) }
+  }
+}
+
+/**
+ * Register the connection-settings routes: read, save, and test.
+ * @param ctx - the plugin context carrying the web server service.
+ */
+function registerConfigRoutes(ctx) {
+  ctx.effect(
+    () =>
+      ctx.webServer.register({
+        kind: 'exact',
+        path: API_PREFIX + '/config',
+        handler: async (req, res) => {
+          if (req.method === 'GET') {
+            try {
+              const settings = await readSettings()
+              const status = await keyStatus(settings)
+              sendJson(res, 200, {
+                ok: true,
+                baseUrl: baseUrl(settings),
+                baseUrlSource: settings.baseUrl !== undefined ? 'plugin-page' : process.env.RAGFLOW_BASE_URL ? 'environment' : 'default',
+                timeoutMs: settings.timeoutMs !== undefined ? settings.timeoutMs : 30000,
+                apiKeyConfigured: status.configured,
+                apiKeySource: status.source,
+                apiKeyMasked: status.masked,
+                credentialProvider: credentialProvider() !== undefined,
+                settingsPath: settingsPath(),
+              })
+            } catch (error) {
+              sendJson(res, 200, { ok: false, error: String((error && error.message) || error) })
+            }
+            return
+          }
+          if (req.method !== 'POST') {
+            sendJson(res, 405, { ok: false, error: 'method not allowed' })
+            return
+          }
+          try {
+            const parsed = JSON.parse((await readBody(req)) || '{}')
+            const next = {}
+            if (parsed.baseUrl !== undefined) next.baseUrl = normalizeBaseUrl(parsed.baseUrl)
+            if (parsed.timeoutMs !== undefined) {
+              const timeout = Number(parsed.timeoutMs)
+              if (!Number.isFinite(timeout) || timeout < 1000 || timeout > 300000) {
+                sendJson(res, 400, { ok: false, error: 'timeoutMs must be between 1000 and 300000' })
+                return
+              }
+              next.timeoutMs = Math.round(timeout)
+            }
+            if (parsed.apiKey !== undefined) {
+              const value = typeof parsed.apiKey === 'string' ? parsed.apiKey.trim() : ''
+              if (value.length === 0) {
+                // An explicit empty string clears a stored key.
+                next.apiKey = undefined
+              } else if (credentialProvider() !== undefined) {
+                await credentialProvider().set(CREDENTIAL_REF, value)
+                next.apiKeyRef = CREDENTIAL_REF
+              } else {
+                next.apiKey = value
+              }
+            }
+            const current = await readSettings()
+            const merged = { ...current, ...next }
+            for (const key of Object.keys(merged)) if (merged[key] === undefined) delete merged[key]
+            // Never persist both shapes at once: the reference wins when it exists.
+            if (merged.apiKeyRef !== undefined) delete merged.apiKey
+            await writeSettings(merged)
+            const status = await keyStatus(merged)
+            sendJson(res, 200, {
+              ok: true,
+              baseUrl: baseUrl(merged),
+              timeoutMs: merged.timeoutMs !== undefined ? merged.timeoutMs : 30000,
+              apiKeyConfigured: status.configured,
+              apiKeySource: status.source,
+              apiKeyMasked: status.masked,
+              settingsPath: settingsPath(),
+            })
+          } catch (error) {
+            const status = error instanceof SyntaxError ? 400 : 200
+            sendJson(res, status, { ok: false, error: String((error && error.message) || error) })
+          }
+        },
+      }),
+    'ragflow-settings: connection config route',
+  )
+
+  ctx.effect(
+    () =>
+      ctx.webServer.register({
+        kind: 'exact',
+        path: API_PREFIX + '/test',
+        handler: async (req, res) => {
+          if (req.method !== 'POST') {
+            sendJson(res, 405, { ok: false, error: 'method not allowed' })
+            return
+          }
+          try {
+            const parsed = JSON.parse((await readBody(req)) || '{}')
+            const saved = await readSettings()
+            // Unsaved values let the page test before saving.
+            const url = parsed.baseUrl !== undefined ? normalizeBaseUrl(parsed.baseUrl) : baseUrl(saved)
+            const timeoutMs = typeof parsed.timeoutMs === 'number' ? parsed.timeoutMs : saved.timeoutMs
+            const typed = typeof parsed.apiKey === 'string' ? parsed.apiKey.trim() : ''
+            const key = typed.length > 0 ? typed : await apiKey(saved)
+            if (key.length === 0) {
+              sendJson(res, 200, { ok: false, error: 'no API key: fill it in or set RAGFLOW_API_KEY' })
+              return
+            }
+            const result = await probeConnection(url, key, timeoutMs)
+            sendJson(res, 200, { ...result, baseUrl: url })
+          } catch (error) {
+            const status = error instanceof SyntaxError ? 400 : 200
+            sendJson(res, status, { ok: false, error: String((error && error.message) || error) })
+          }
+        },
+      }),
+    'ragflow-settings: connection test route',
+  )
 }
 
 /** Session ids DSH mints; the same shape the session selection file keys on. */
@@ -612,9 +881,12 @@ function registerTools(ctx) {
               : 'no RAGFlow dataset is readable with the configured API key',
         )
       }
-      const key = await apiKey()
+      const settings = await readSettings()
+      const key = await apiKey(settings)
       if (key.length === 0) {
-        throw new Error('RAGFLOW_API_KEY is neither in the Host environment nor in the Windows user environment.')
+        throw new Error(
+          'no RAGFlow API key is configured: fill it in on the RAGFlow plugin page, or set RAGFLOW_API_KEY.',
+        )
       }
       const body = {
         question,
@@ -625,7 +897,7 @@ function registerTools(ctx) {
         vector_similarity_weight: typeof args.vector_similarity_weight === 'number' ? args.vector_similarity_weight : 0.3,
       }
       if (Array.isArray(args.document_ids) && args.document_ids.length > 0) body.document_ids = args.document_ids
-      const response = await apiCallJson('POST', '/api/v1/retrieval', key, body, exec.signal)
+      const response = await apiCallJson('POST', '/api/v1/retrieval', key, body, exec.signal, settings)
       if (response.code !== 0) throw new Error('RAGFlow error ' + String(response.code) + ': ' + String(response.message))
       const data = response.data || {}
       const chunks = (Array.isArray(data.chunks) ? data.chunks : []).map((chunk, index) => ({
